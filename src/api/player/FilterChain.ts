@@ -1,5 +1,5 @@
-import type { Player } from "../Player";
-import type { Band, Equalizer, FilterMap, Karaoke, Timescale, Tremolo } from "../i.ts";
+import type { Player } from "./Player.ts";
+import type { Band, Equalizer, FilterMap, Karaoke, Timescale, Tremolo } from "./i.ts";
 
 export class FilterChain {
 	/**
