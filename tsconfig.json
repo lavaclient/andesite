@@ -1,11 +1,17 @@
 {
-  "exclude": ["./node_modules", "./dist"],
+  "exclude": [
+    "./node_modules",
+    "./dist",
+    "./tests"
+  ],
   "include": [
     "./src/**/*"
   ],
   "compilerOptions": {
     /* Basic */
-    "lib": ["ES2020"],
+    "lib": [
+      "ES2020"
+    ],
     "target": "ES2020",
     "module": "CommonJS",
     "skipLibCheck": true,
@@ -35,7 +41,9 @@
     "importsNotUsedAsValues": "error",
 
     /* Types */
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "forceConsistentCasingInFileNames": true,
 
     /* Module Resolution */

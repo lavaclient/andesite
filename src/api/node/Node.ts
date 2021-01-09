@@ -1,384 +1,529 @@
-import { NodeMetadata, NodeOptions, NodeStats, NodeStatus } from "./i.ts";
 import WebSocket from "ws";
-import { ManagerEvent } from "../../constants.ts";
 
-import type { Player } from "../player/Player.ts";
-import type { Manager } from "../Manager.ts";
+import { Player } from "../player/Player";
+import { REST } from "./REST";
+import { ManagerEvent, PlayerManager } from "../PlayerManager";
+
+import type { NodeMetadata, NodeOptions, NodeStats, PlayerTransport, ReconnectionOptions, Dictionary } from "../types";
+
+export enum NodeStatus {
+  /**
+   * The websocket is currently connected to the node.
+   */
+  CONNECTED,
+
+  /**
+   * The websocket is connecting to the node.
+   */
+  CONNECTING,
+
+  /**
+   * The websocket is currently disconnected from the node.
+   */
+  DISCONNECTED,
+
+  /**
+   * The websocket is currently trying to reconnect.
+   */
+  RECONNECTING
+}
 
 export class Node {
-	/**
-	 * The identifier for this node.
-	 */
-	public readonly id: string | number;
+  /**
+   * The identifier for this node.
+   */
+  readonly id: string | number;
 
-	/**
-	 * Whether to use wss/https
-	 */
-	public readonly secure: boolean;
+  /**
+   * Whether to use wss/https
+   */
+  readonly secure: boolean;
 
-	/**
-	 * The configured port of the andesite instance.
-	 */
-	public readonly port?: number;
+  /**
+   * The configured port of the andesite instance.
+   */
+  readonly port?: number;
 
-	/**
-	 * The total number of tries this node can use to reconnect.
-	 */
-	public totalReconnectTries: number;
+  /**
+   * The reconnection options for this node.
+   */
+  readonly reconnection: Required<ReconnectionOptions>;
 
-	/**
-	 * The metadata of the andesite-instance.
-	 */
-	public meta?: NodeMetadata;
+  /**
+   * The current reconnection try this node is on, or 0 if this player hasn't closed.
+   */
+  currentReconnect: number = 0;
 
-	/**
-	 * The stats of the andesite-instance.
-	 */
-	public stats?: NodeStats;
+  /**
+   * The resume id for this node.
+   */
+  connectionId?: number;
 
-	/**
-	 * The number of tries used to reconnect.
-	 * @private
-	 */
-	#reconnectTries: number;
+  /**
+   * When a connection is closed, events will be buffered for up to the timeout specified here.
+   */
+  eventBuffer?: number;
 
-	/**
-	 * The resume id for this node.
-	 * @private
-	 */
-	#resumeId?: number
+  /**
+   * The metadata of the andesite-instance.
+   */
+  meta?: NodeMetadata;
 
-	/**
-	 * The websocket instance.
-	 */
-	#ws!: WebSocket;
+  /**
+   * The stats of the andesite-instance.
+   */
+  stats?: NodeStats;
 
-	/**
-	 * The current status of this node.
-	 * @private
-	 */
-	#status: NodeStatus
+  /**
+   * The timeout for reconnecting.
+   * @private
+   */
+  #reconnectTimeout: NodeJS.Timeout | null = null;
 
-	/**
-	 * The status promise.
-	 * @private
-	 */
-	#statsPromise?: (stats: NodeStats) => void;
+  /**
+   * The websocket instance.
+   */
+  #ws?: WebSocket;
 
-	/**
-	 * Queue for outgoing messages.
-	 */
-	readonly #queue: Payload[];
+  /**
+   * The current status of this node.
+   * @private
+   */
+  #status: NodeStatus;
 
-	/**
-	 * The host of the andesite instance.
-	 * @private
-	 */
-	readonly #host: string;
+  /**
+   * The rest manager.
+   * @private
+   */
+  #rest: REST | null = null;
 
-	/**
-	 * The password for the andesite instance.
-	 * @private
-	 */
-	readonly #password?: string;
+  /**
+   * Queue for outgoing messages.
+   * @private
+   */
+  readonly #queue: unknown[];
 
-	/**
-	 * The active players for this node.
-	 * @private
-	 */
-	readonly #players: Map<string, Player>
+  /**
+   * The host of the andesite instance.
+   * @private
+   */
+  readonly #host: string;
 
-	/**
-	 * The manager instance.
-	 * @private
-	 */
-	readonly #manager: Manager
+  /**
+   * The password for the andesite instance.
+   * @private
+   */
+  readonly #auth?: string;
 
-	/**
-	 * @param manager The manager instance.
-	 * @param options The options for this node.
-	 */
-	public constructor(manager: Manager, options: Required<NodeOptions>) {
-		this.#manager = manager
-		this.#players = new Map();
-		this.#status = NodeStatus.DISCONNECTED;
-		this.#queue = [];
-		this.#reconnectTries = 0;
+  /**
+   * The active players for this node.
+   * @private
+   */
+  readonly #players: Map<string, Player>;
 
-		this.id = options.id;
-		this.port = +options.port;
-		this.secure = options.secure ?? false;
-		this.totalReconnectTries = options.reconnectTries ?? 5;
+  /**
+   * The manager instance.
+   * @private
+   */
+  readonly #manager: PlayerManager;
 
-		this.#password = options.password;
-		this.#host = options.host
-	}
+  /**
+   * @param manager The manager instance.
+   * @param options The options for this node.
+   */
+  constructor(manager: PlayerManager, options: Required<NodeOptions>) {
+    this.id = options.id;
+    this.port = +options.port;
+    this.secure = options.secure ?? false;
+    this.reconnection = Object.assign(options.reconnection ?? {}, manager.reconnectionDefaults);
+    this.eventBuffer = options.eventBuffer ?? manager.eventBuffer;
 
-	/**
-	 * The active players for this node.
-	 */
-	public getPlayers(): Map<string, Player> {
-		return this.#players;
-	}
+    this.#manager = manager;
+    this.#players = new Map();
+    this.#status = NodeStatus.DISCONNECTED;
+    this.#queue = [];
+    this.#auth = options.auth;
+    this.#host = options.host;
+  }
 
-	/**
-	 * The current status of this node.
-	 */
-	public getStatus(): NodeStatus {
-		return this.#status;
-	}
+  /**
+   * The rest manager for this node.
+   */
+  get rest(): REST {
+    if (!this.#rest) {
+      this.#rest = new REST(this);
+    }
 
-	/**
-	 * The manager instance.
-	 */
-	public getManager(): Manager {
-		return this.#manager;
-	}
+    return this.#rest;
+  }
 
-	/**
-	 * Whether this node can reconnect.
-	 */
-	public canReconnect(): boolean {
-		return this.#reconnectTries < this.totalReconnectTries;
-	}
+  /**
+   * The active players for this node.
+   */
+  get players(): Map<string, Player> {
+    return this.#players;
+  }
 
-	/**
-	 * Get the current stats of the andesite instance.
-	 */
-	public async getStats(): Promise<NodeStats> {
-		return new Promise((res, rej) => {
-			if (!this.isConnected()) {
-				rej("This node is not connected.");
-				return;
-			}
+  /**
+   * The host of this andesite instance.
+   */
+  get host(): string {
+    return this.#host;
+  }
 
-			this.#statsPromise = res;
-			this.sendWs({ op: "get-stats" });
-		});
-	}
+  /**
+   * The authorization for this andesite instance.
+   */
+  get auth(): string | undefined {
+    return this.#auth;
+  }
 
-	/**
-	 * Whether the websocket is open / connected.
-	 */
-	public isConnected(): boolean {
-		return this.#ws && this.#ws.readyState === WebSocket.OPEN;
-	}
+  /**
+   * The current status of this node.
+   */
+  get status(): NodeStatus {
+    return this.#status;
+  }
 
-	/**
-	 * Penalties of this node. The higher the return number, the larger load the andesite instance is handling.
-	 */
-	public getPenaltyCount(): number {
-		if (!this.stats) {
-			return 0
-		}
+  /**
+   * The manager instance.
+   */
+  get manager(): PlayerManager {
+    return this.#manager;
+  }
 
-		let penalties = 0;
-		penalties += this.stats.players.playing;
-		penalties += Math.round(Math.pow(1.05, 100 * this.stats.cpu.system) * 10 - 10);
-		if (this.stats.frameStats) {
-			penalties += this.stats.frameStats.reduce((a, fs) => a + fs.loss, 0);
-		}
 
-		return penalties;
-	}
+  /**
+   * Penalties of this node. The higher the return number, the larger load the andesite instance is handling.
+   */
+  get penalties(): number {
+    if (!this.stats) {
+      return 0;
+    }
 
-	/**
-	 * Send a packet to the andesite instance.
-	 * @param data The packet data
-	 * @param prioritize Whether to prioritize this packet.
-	 */
-	public sendWs(data: { op: string } & Record<string, any>, prioritize = false) {
-		return new Promise((resolve, reject) => {
-			const packet = JSON.stringify(data);
-			if (prioritize) {
-				this.#queue.unshift({ packet, resolve, reject });
-			} else {
-				this.#queue.push({ packet, resolve, reject });
-			}
+    let penalties = 0;
+    penalties += this.stats.players.playing;
+    penalties += Math.round(Math.pow(1.05, 100 * this.stats.cpu.system) * 10 - 10);
+    if (this.stats.frameStats) {
+      penalties += this.stats.frameStats.reduce((a, fs) => a + fs.loss, 0);
+    }
 
-			if (this.isConnected()) {
-				this.processQueue().then();
-			}
-		});
-	}
+    return penalties;
+  }
 
-	/**
-	 * Configure the event buffer for this session.
-	 * @param timeout Timeout for event buffering, in milliseconds
-	 */
-	public async configureEventBuffer(timeout: number): Promise<number> {
-		await this.sendWs({
-			op: "event-buffer",
-			timeout
-		});
+  /**
+   * Whether the websocket is open / connected.
+   */
+  get connected(): boolean {
+    return !!this.#ws && this.#ws?.readyState === WebSocket.OPEN;
+  }
 
-		return timeout;
-	}
+  /**
+   * Creates a new player with the provided guildId and transport.
+   *
+   * @param guildId The guild id.
+   * @param transport The transport to use.
+   */
+  createPlayer(guildId: string, transport: PlayerTransport = "websocket"): Player {
+    let player = this.players.get(guildId);
+    if (player) {
+      return player;
+    }
 
-	/**
-	 * Connect this node to the andesite instance.
-	 */
-	public connect(): void {
-		if (this.#status !== NodeStatus.RECONNECTING) {
-			this.#status = NodeStatus.CONNECTING;
-		}
+    this.debug(`creating player for ${guildId} with transport: ${transport}`);
+    player = Player.create(transport, this, guildId);
+    this.players.set(guildId, player);
 
-		if (this.isConnected()) {
-			this.cleanUp()
-			this.#ws?.close(1012);
-			this.#ws = undefined
-		}
+    return player;
+  }
 
-		const headers: Record<string, any> = {}
-		if (this.#resumeId) {
-			headers["Andesite-Resume-Id"] = this.#resumeId
-		}
+  /**
+   * Destroys a player that is assigned the provided guild id.
+   *
+   * @param guildId Guild ID of the player to destroy.
+   */
+  async destroyPlayer(guildId: string): Promise<boolean> {
+    const player = this.players.get(guildId);
+    if (!player) {
+      return false;
+    }
 
-		if (this.#password) {
-			headers.authorization = this.#password
-		}
+    await player.disconnect().destroy();
+    return this.players.delete(guildId);
+  }
 
-		this.#ws = new WebSocket(this.getWsAddress(), { headers });
-		this.#ws.onopen = this.handleOpen.bind(this);
-		this.#ws.onclose = this.handleClose.bind(this);
-		this.#ws.onerror = this.handleError.bind(this);
-		this.#ws.onmessage = this.handleMessage.bind(this);
-	}
+  /**
+   * Send a packet to the andesite instance.
+   * @param data The packet data
+   * @param prioritize Whether to prioritize this packet.
+   */
+  async sendWs(data: { op: string } & Dictionary, prioritize = false) {
+    this.debug(`queueing \"${data.op}\" operation, it is${prioritize ? "" : " not"} prioritized`);
+    this.#queue[prioritize ? "unshift" : "push"](JSON.stringify(data));
+    await this.processQueue();
+  }
 
-	public reconnect(): void {
+  /**
+   * Configure the event buffer for this session.
+   * @param timeout Timeout for event buffering, in milliseconds
+   */
+  async configureEventBuffer(timeout: number): Promise<number> {
+    await this.sendWs({
+      op: "event-buffer",
+      timeout,
+    }, true);
 
-	}
+    return timeout;
+  }
 
-	/**
-	 * Processes all of the queued payloads.
-	 * @private
-	 */
-	protected async processQueue(): Promise<void> {
-		if (this.#queue.length === 0) return;
+  /**
+   * Closes the websocket connection.
+   * @returns {Promise<void>}
+   */
+  async close(reason = "destroy") {
+    if (this.#ws && this.connected) {
+      await this.processQueue();
+      this.#ws.onclose = () => this.#manager.emit(ManagerEvent.NODE_DISCONNECT, { reason }, this);
+      this.#ws?.close(1000, reason);
+    }
 
-		while (this.#queue.length > 0) {
-			const payload = this.#queue.shift();
-			if (!payload) return;
-			await this.send(payload);
-		}
-	}
+    this.#ws = undefined;
+  }
 
-	/**
-	 * Get the websocket address of the andesite instance.
-	 * @protected
-	 */
-	protected getWsAddress(): string {
-		return `ws${this.secure ? "s" : ""}://${this.#host}${this.port ? `:${this.port}` : ""}`;
-	}
+  /**
+   * Connect this node to the andesite instance.
+   */
+  async connect(userId: string): Promise<this> {
+    if (this.#status !== NodeStatus.RECONNECTING) {
+      this.#status = NodeStatus.CONNECTING;
+    }
 
-	/**
-	 * Cleans up the websocket listeners.
-	 * @since 1.0.0
-	 * @private
-	 */
-	protected cleanUp(): void {
-		delete this.#ws?.onclose;
-		delete this.#ws?.onopen;
-		delete this.#ws?.onmessage;
-		delete this.#ws?.onerror;
-	}
+    if (this.connected) {
+      this.cleanUp();
+      await this.close("reconnecting");
+    }
 
-	/**
-	 * Handles the "open" websocket event.
-	 * @private
-	 */
-	private async handleOpen() {
-		this.#manager.emit(ManagerEvent.NODE_READY, this)
+    const headers: Record<string, any> = {
+      "User-Id": userId,
+    };
 
-		await this.processQueue()
-			.catch((e) => this.#manager.emit(ManagerEvent.NODE_ERROR, e, this));
+    if (this.connectionId) {
+      headers["Andesite-Resume-Id"] = this.connectionId;
+    }
 
-		this.#status = NodeStatus.CONNECTED
-	}
+    if (this.#auth) {
+      headers.authorization = this.#auth;
+    }
 
-	/**
-	 * Handles the "message" websocket event.
-	 * @param data The message data.
-	 *
-	 * @private
-	 */
-	private async handleMessage({ data }: WebSocket.MessageEvent) {
-		if (data instanceof ArrayBuffer) data = Buffer.from(data);
-		else if (Array.isArray(data)) data = Buffer.concat(data);
+    this.#ws = new WebSocket(`ws${this.secure ? "s" : ""}://${this.#host}${this.port ? `:${this.port}` : ""}/websocket`, {
+      headers,
+    });
 
-		let pk: any;
-		try {
-			pk = JSON.parse(data.toString());
-		} catch (e) {
-			this.#manager.emit(ManagerEvent.NODE_ERROR, e, this);
-			return;
-		}
+    this.#ws.onopen = this.handleOpen.bind(this);
+    this.#ws.onclose = this.handleClose.bind(this);
+    this.#ws.onerror = this.handleError.bind(this);
+    this.#ws.onmessage = this.handleMessage.bind(this);
 
-		switch (pk.op) {
-			case "connection-id":
-				this.#resumeId = pk.id;
-				break;
-			case "metadata":
-				this.meta = pk.data;
-				break;
-			case "stats":
-				if (this.#statsPromise) {
-					this.#statsPromise(pk.stats);
-					this.#statsPromise = undefined;
-				}
+    return this;
+  }
 
-				this.stats = pk.stats;
-				break;
-			case "event":
-			case "player-update":
-				break;
-		}
+  /**
+   * Reconnects to the andesite instance.
+   */
+  async reconnect(): Promise<void> {
+    if (this.#reconnectTimeout) {
+      clearTimeout(this.#reconnectTimeout);
+      this.#reconnectTimeout = null;
+    }
 
-		this.#manager.emit(ManagerEvent.NODE_PACKET, pk, this)
-	}
+    switch (this.currentReconnect) {
+      case this.reconnection.tries:
+        this.#status = NodeStatus.DISCONNECTED;
+        this.manager.emit(ManagerEvent.NODE_DISCONNECT, { reason: `Ran out of reconnection tries` }, this);
+        this.debug("couldn't reconnect.");
+        break;
+      default:
+        this.currentReconnect++;
+        this.#status = NodeStatus.RECONNECTING;
+        this.debug(`reconnecting... current try: ${this.currentReconnect} out of ${this.reconnection.tries}`);
+        await this.connect(this.manager.userId!);
+    }
+  }
 
-	/**
-	 * Handles the "close" websocket event.
-	 * @param event The event data.
-	 *
-	 * @private
-	 */
-	private async handleClose(event: WebSocket.CloseEvent) {
-		if (this.#reconnectTries === this.totalReconnectTries) {
-			this.#manager.emit(ManagerEvent.NODE_DISCONNECT, event, this);
-		}
+  /**
+   * Emits a debug message.
+   * @param message The debug message.
+   * @private
+   */
+  debug(message: string) {
+    if (this.#manager.listenerCount(ManagerEvent.DEBUG)) {
+      this.#manager.emit(ManagerEvent.DEBUG, `(node: ${this.id}) ${message.trim()}`);
+    }
+  }
 
-		if (event.code !== 1000 && event.reason !== "destroy") {
-			this.reconnect();
-		}
-	}
+  /**
+   * Processes all of the queued payloads.
+   * @private
+   */
+  protected async processQueue(): Promise<void> {
+    if (!this.connected || this.#queue.length === 0) {
+      return Promise.resolve();
+    }
 
-	/**
-	 * Handles the "error" websocket event.
-	 * @param event The event data.
-	 *
-	 * @private
-	 */
-	private async handleError(event: WebSocket.ErrorEvent) {
-		const error = event.error ? event.error : event.message;
-		this.#manager.emit(ManagerEvent.NODE_ERROR, error, this);
-	}
+    return new Promise(async res => {
+      while (this.#queue.length > 0) {
+        const payload = this.#queue.shift();
+        if (!payload) {
+          return res();
+        }
 
-	/**
-	 * Sends a packet to the andesite instance.
-	 * @private
-	 */
-	private async send(payload: Payload): Promise<void> {
-		return this.#ws?.send(payload.packet, (err: Error) => {
-			if (err) payload.reject(err);
-			else payload.resolve();
-		});
-	}
+        await this.send(payload);
+      }
+
+      return res();
+    });
+  }
+
+  /**
+   * Cleans up the websocket listeners.
+   * @since 1.0.0
+   * @private
+   */
+  protected cleanUp(): void {
+    if (this.#ws) {
+      this.#ws.onclose = () => void 0;
+      this.#ws.onerror = () => void 0;
+      this.#ws.onopen = () => void 0;
+      this.#ws.onmessage = () => void 0;
+    }
+  }
+
+  /**
+   * queues a reconnect.
+   * @protected
+   */
+  protected queueReconnect() {
+    if (this.#reconnectTimeout) {
+      clearTimeout(this.#reconnectTimeout);
+      this.#reconnectTimeout = null;
+    }
+
+    return this.#reconnectTimeout = setTimeout(() => this.reconnect(), this.reconnection.delay);
+  }
+
+  /**
+   * Handles the "open" websocket event.
+   * @private
+   */
+  private async handleOpen() {
+    if (this.#reconnectTimeout) {
+      clearTimeout(this.#reconnectTimeout);
+      this.#reconnectTimeout = null;
+      this.debug("successfully reconnected...");
+    }
+
+    this.#manager.emit(ManagerEvent.NODE_READY, this);
+    this.#status = NodeStatus.CONNECTED;
+    if (this.eventBuffer) {
+      await this.configureEventBuffer(this.eventBuffer);
+    }
+
+    await this.processQueue();
+  }
+
+  /**
+   * Handles the "message" websocket event.
+   * @param data The message data.
+   *
+   * @private
+   */
+  private async handleMessage({ data }: WebSocket.MessageEvent) {
+    if (data instanceof ArrayBuffer) {
+      data = Buffer.from(data);
+    } else if (Array.isArray(data)) {
+      data = Buffer.concat(data);
+    }
+
+    let pk: any;
+    try {
+      pk = JSON.parse(data.toString());
+    } catch (e) {
+      this.#manager.emit(ManagerEvent.NODE_ERROR, e, this);
+      return;
+    }
+
+    switch (pk.op) {
+      case "connection-id":
+        this.connectionId = pk.id;
+        break;
+      case "metadata":
+        this.meta = pk.data;
+        break;
+      case "stats":
+        this.stats = pk.stats;
+        break;
+      case "event":
+      case "player-update":
+        const player = this.players.get(pk.guildId);
+        if (!player) {
+          this.debug(`Received ${pk.op} for unknown player, guildId = ${pk.guildId}`);
+        } else {
+          if (pk.op === "event") {
+            await player.handleEvent(pk);
+          } else {
+            player.state = pk.state;
+          }
+        }
+
+        break;
+    }
+
+    this.#manager.emit(ManagerEvent.NODE_PACKET, pk, this);
+  }
+
+  /**
+   * Handles the "close" websocket event.
+   * @param event The event data.
+   *
+   * @private
+   */
+  private async handleClose(event: WebSocket.CloseEvent) {
+    if (this.#status === NodeStatus.RECONNECTING) {
+      return this.queueReconnect();
+    }
+
+    this.manager.emit(ManagerEvent.NODE_DISCONNECT, event, this);
+    await this.reconnect();
+  }
+
+  /**
+   * Handles the "error" websocket event.
+   * @param event The event data.
+   *
+   * @private
+   */
+  private async handleError(event: WebSocket.ErrorEvent) {
+    this.#manager.emit(ManagerEvent.NODE_ERROR, event.error ? event.error : event.message, this);
+    if (this.#status === NodeStatus.RECONNECTING) {
+      await this.queueReconnect();
+    }
+  }
+
+  /**
+   * Sends a payload to the andesite instance.
+   * @private
+   */
+  private send(payload: unknown): Promise<void> {
+    return new Promise((res, rej) => {
+      this.#ws?.send(payload, err => {
+        this.debug(`${err ? "-" : "+"} => ${payload}`);
+        if (err) {
+          this.manager.emit(ManagerEvent.NODE_ERROR, err, this);
+          return rej(err);
+        }
+
+        return res();
+      });
+    });
+  }
 }
-
-export interface Payload {
-	resolve: (...args: any[]) => unknown;
-	reject: (...args: unknown[]) => unknown;
-	packet: unknown;
-}
-

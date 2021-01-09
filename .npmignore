@@ -1,0 +1,10 @@
+tests/
+docs/
+node_modules/
+src/
+
+tsconfig.json
+typedoc.json
+yarn.lock
+.gitignore
+
