@@ -2,7 +2,7 @@
 
 > A feature-rich [andesite](https://github.com/natanbc/andesite) client.
 
-[Support Server](https://discord.gg/vuJxnYk) &bull; [Github](https://github.com/lavaclient/github) 
+[Support Server](https://discord.gg/vuJxnYk) &bull; [Github](https://github.com/lavaclient/github) &bull; [Documentation](https://github.com/Lavaclient/andesite/blob/master/docs/modules.md)
 
 ## Installation
 
