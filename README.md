@@ -1,4 +1,4 @@
-# andesitejs
+# [andesite.js](https://npmjs.com/andesite.js)
 
 > A feature-rich [andesite](https://github.com/natanbc/andesite) client.
 
@@ -7,13 +7,13 @@
 ## Installation
 
 ```shell
-npm install --save andesitejs
+npm install --save andesite.js
 ```
 
 or yarn
 
 ```shell
-yarn add andesitejs
+yarn add andesite.js
 ```
 
 ## Example
@@ -24,7 +24,7 @@ yarn add andesitejs
 >   3. initialize the manager with your client's user id as the first parameter.
 
 ```ts
-import { PlayerManager } from "andesitejs";
+import { PlayerManager } from "andesite.js";
 
 const manager = new PlayerManager({
   nodes: [ { host: "localhost", port: 5000 } ],
